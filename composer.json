@@ -1,0 +1,36 @@
+{
+	"name": "digicreon/temma-lib",
+	"type": "library",
+	"description": "Temma library for Composer loading",
+	"keywords": [
+		"framework",
+		"mvc",
+		"rapid-development",
+		"conventions over configuration",
+		"dry"
+	],
+	"homepage": "https://www.temma.net/",
+	"license": "MIT",
+	"authors": [
+		{
+			"name": "Temma Community",
+			"homepage": "https://www.temma.net/"
+		}
+	],
+	"require": {
+		"php": ">=8.0",
+		"ext-intl": "*",
+		"ext-json": "*",
+		"ext-mbstring": "*"
+	},
+	"autoload": {
+		"psr-4": {
+			"Temma\\": "lib/Temma/"
+		}
+	},
+	"support": {
+		"source": "https://github.com/Digicreon/Temma",
+		"forum": "https://github.com/Digicreon/discussions",
+		"issues": "https://github.com/Digicreon/Temma/issues"
+	}
+}
