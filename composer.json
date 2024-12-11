@@ -2,19 +2,20 @@
 	"name": "digicreon/temma-lib",
 	"type": "library",
 	"description": "Temma library for Composer loading",
+	"homepage": "https://www.temma.net/",
 	"keywords": [
 		"framework",
+		"php",
 		"mvc",
 		"rapid-development",
-		"conventions over configuration",
-		"dry"
+		"api",
+		"smarty"
 	],
-	"homepage": "https://www.temma.net/",
 	"license": "MIT",
 	"authors": [
 		{
-			"name": "Temma Community",
-			"homepage": "https://www.temma.net/"
+			"name": "Amaury Bouchard",
+			"email": "amaury@amaury.net"
 		}
 	],
 	"require": {
@@ -28,6 +29,7 @@
 		}
 	},
 	"support": {
+		"docs": "https://www.temma.net/",
 		"source": "https://github.com/Digicreon/Temma",
 		"forum": "https://github.com/Digicreon/discussions",
 		"issues": "https://github.com/Digicreon/Temma/issues"
