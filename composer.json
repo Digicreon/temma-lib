@@ -7,7 +7,6 @@
 		"framework",
 		"php",
 		"mvc",
-		"rapid-development",
 		"api",
 		"smarty"
 	],
