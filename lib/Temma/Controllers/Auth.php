@@ -117,6 +117,8 @@ use \Temma\Utils\Email as TµEmail;
  * ```
  */
 class Auth extends \Temma\Web\Plugin {
+	/** Constant: default maximum number of authentication attempts per hour. */
+	private const MAX_AUTH_ATTEMPTS_PER_HOUR = 5;
 	/** User DAO. */
 	private ?\Temma\Dao\Dao $_userDao = null;
 	/** Token DAO. */
@@ -127,6 +129,8 @@ class Auth extends \Temma\Web\Plugin {
 	private string $_expirationFieldName = 'expiration';
 	/** Name of the "user_id" field in the "AuthToken" table. */
 	private string $_userIdFieldName = 'user_id';
+	/** Redirection URL, used for most of operations. */
+	private string $_redirectUrl = '/auth/login';
 
 	/** Preplugin: check if the user is authenticated. */
 	public function preplugin() {
@@ -156,9 +160,14 @@ class Auth extends \Temma\Web\Plugin {
 		$this['currentUser'] = $user;
 		$this['currentUserId'] = $currentUserId;
 	}
+	/** Initialization. */
+	public function __wakeup() {
+		if ($this['lang'])
+			$this->_redirectUrl = '/' . $this['lang'] . $this->_redirectUrl;
+	}
 	/** Redirection of the root action. */
 	public function __invoke() {
-		return $this->_redirect('/auth/login');
+		return $this->_redirect($this->_redirectUrl);
 	}
 	/** Logout of the currently connected user. */
 	#[TµAuth(redirect: '/auth/login')]
@@ -169,7 +178,7 @@ class Auth extends \Temma\Web\Plugin {
 		if ($this['currentUser'])
 			$this->_session['__authStatus'] = 'logout';
 		// redirection
-		return $this->_redirect('/auth/login');
+		return $this->_redirect($this->_redirectUrl);
 	}
 	/**
 	 * Login page.
@@ -189,16 +198,32 @@ class Auth extends \Temma\Web\Plugin {
 	#[TµPost]
 	#[TµAuth(authenticated: false, redirect: '/')]
 	public function authentication() {
-		$this->_redirect('/auth/login');
+		$this->_redirect($this->_redirectUrl);
 		// get the configuration
 		$conf = $this->_config->xtra('security', 'auth');
 		// check email address
 		$email = trim($_POST['email'] ?? null);
-		if (!$email || filter_var($email, FILTER_VALIDATE_EMAIL) === false) {
+		if (!$email || filter_var($email, FILTER_VALIDATE_EMAIL) === false ||
+		    !checkdnsrr(explode('@', $email)[1], 'MX')) {
 			TµLog::log('Temma/App', 'DEBUG', "Invalid email address '$email'.");
 			$this->_session['__authStatus'] = 'email';
 			return (self::EXEC_HALT);
 		}
+		// check rate limit
+		$attempts = $this->_session['authAttempts'] ?? [];
+		$attemps['hour'] ??= '';
+		$attempts['nb'] ??= 0;
+		if ($attempts['hour'] != date('YmdH')) {
+			$attempts['hour'] = date('YmdH');
+		} else {
+			if ($attempts['nb'] > self::MAX_AUTH_ATTEMPTS_PER_HOUR) {
+				TµLog::log('Temma/App', 'DEBUG', "Reached maximum authentication attempts per hour for '$email'.");
+				$this->_session['__authStatus'] = 'attempts';
+				return (self::EXEC_HALT);
+			}
+			$attempts['nb']++;
+		}
+		$this->_session['authAttempts'] = $attempts;
 		// check hash (anti-robot system)
 		if (!($conf['robotCheckDisabled'] ?? false)) {
 			$hash = $_POST['hash'] ?? '';
@@ -296,11 +321,13 @@ class Auth extends \Temma\Web\Plugin {
 		// check the user (hence the token)
 		if (!$currentUser) {
 			$this->_session['__authStatus'] = 'badToken';
-			return $this->_redirect('/auth/login');
+			return $this->_redirect($this->_redirectUrl);
 		}
 		// store the user identifier in session
 		$currentUserId = $currentUser['id'] ?? null;
 		$this->_session['currentUserId'] = $currentUserId;
+		// reset the rate limit
+		unset($this->_session['authAttempts']);
 		// redirection
 		$url = $this->_session['authRequestedUrl'];
 		unset($this->_session['authRequestedUrl']);
