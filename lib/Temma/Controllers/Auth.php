@@ -3,7 +3,7 @@
 /**
  * Auth
  * @author	Amaury Bouchard <amaury@amaury.net>
- * @copyright	© 2023, Amaury Bouchard
+ * @copyright	© 2023-2026, Amaury Bouchard
  * @link	https://www.temma.net/documentation/helper-ctrl_auth
  */
 
@@ -211,7 +211,7 @@ class Auth extends \Temma\Web\Plugin {
 		}
 		// check rate limit
 		$attempts = $this->_session['authAttempts'] ?? [];
-		$attemps['hour'] ??= '';
+		$attempts['hour'] ??= '';
 		$attempts['nb'] ??= 0;
 		if ($attempts['hour'] != date('YmdH')) {
 			$attempts['hour'] = date('YmdH');
@@ -232,9 +232,9 @@ class Auth extends \Temma\Web\Plugin {
 				$this->_session['__authStatus'] = 'robot';
 				return (self::EXEC_HALT);
 			}
-			$timeDiff = intval($matches[1] ?? 0);
-			$loginTime = $matches[2] ?? 0;
-			$hash = $matches[3] ?? '';
+			$timeDiff = intval($matches[1]);
+			$loginTime = intval($matches[2]);
+			$hash = $matches[3];
 			$computedHash = md5($timeDiff . ':' . $loginTime . ':' . $email . ':' . $_SERVER['HTTP_USER_AGENT']);
 			if ($timeDiff < 2000 || $timeDiff > 3600000 || // [1]
 			    abs(time() - ($loginTime / 1000)) > 300 || // [2]

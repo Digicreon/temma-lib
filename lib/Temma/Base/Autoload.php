@@ -3,21 +3,23 @@
 /**
  * Autoload
  * @author	Amaury Bouchard <amaury@amaury.net>
- * @copyright	© 2012-2023, Amaury Bouchard
+ * @copyright	© 2012-2026, Amaury Bouchard
  */
 
 namespace Temma\Base;
+
+use \Temma\Utils\File as TµFile;
 
 /**
  * Autoloading management object.
  *
  * Usage:
- * <code>
+ * ```php
  * // autoloader init
  * require_once('Temma/Base/Autoload.php');
  * \Temma\Base\Autoload::autoload();
- * 
- * // use objects without explicitly loading file
+ *
+ * // use objects without explicitly loading files
  * // this object must be defined in the 'NS1/NS2/Object1.php' file, inside a directory of the included paths.
  * $instance1 = new \NS1\NS2\Object1();
  * // this object must be defined in the 'NS1/NS3/Object2.php' file, inside a directory of the included paths.
@@ -40,7 +42,7 @@ namespace Temma\Base;
  *     '\Temma\Base'      => '/path/to/temma/base/directory',
  *     '\Acme\Log\Writer' => './acme-log-writer/lib/',
  * ]);
- * </code>
+ * ```
  *
  * @link	https://www.php-fig.org/psr/psr-0/
  * @link	https://www.php-fig.org/psr/psr-4/
@@ -48,62 +50,83 @@ namespace Temma\Base;
 class Autoload {
 	/** List of known namespaces. */
 	static protected array $_namespaces = [];
+	/** List of known included paths. */
+	static protected array $_includePaths = [];
 
 	/**
 	 * Starts the autoloader.
-	 * @param	null|string|array	$path	(optional) Include path, or list of include paths, or associative array of namespaces associated to paths.
+	 * @param	null|string|array	$path		(optional) Autoload include path, or list of include paths, or associative array of namespaces associated to paths.
+	 * @param	null|string|array	$phpPath	(optional) PHP include path(s).
 	 */
-	static public function autoload(null|string|array $path=null) : void {
+	static public function autoload(null|string|array $path=null, null|string|array $phpPath=null) : void {
 		// autoloader init
 		spl_autoload_register([get_called_class(), 'load'], true, true);
 		if ($path)
 			self::addIncludePath($path);
+		if ($phpPath)
+			self::addPhpIncludePath($phpPath);
 	}
 	/**
 	 * Loads a class, an interface or a trait.
 	 * @param	string	$name	The namespaced name of the class.
 	 */
 	static public function load(string $name) : void {
-		$name = '\\' . ltrim($name, '\\');
-		// check if there is some configured namespaces
+		// normalize the name with a leading backslash
+		$name = '\\' . trim($name, '\\');
+		// check if there are configured namespaces
 		if (self::$_namespaces) {
 			$prefix = $name;
+			// look for the namespace prefix
 			while (($pos = mb_strrpos($prefix, '\\')) !== false) {
-				// cut the prefix down
-				$prefix = substr($name, 0, $pos);
+				// shorten the prefix
+				$prefix = mb_substr($prefix, 0, $pos);
 				// check if this prefix was declared
 				$prefixPath = self::$_namespaces[$prefix] ?? null;
-				if (!$prefixPath) {
-					// trim the last backslash from the prefix and loop again
-					$prefix = rtrim($prefix, '\\');
+				if (!$prefixPath)
 					continue;
-				}
-				// extract the subname from this part
-				$subname = substr($name, $pos + 1);
-				// transform the subname into path
-				$subname = ltrim($subname, '\\');
-				$subname = str_replace('\\', DIRECTORY_SEPARATOR, $subname);
-				// try to load the file
-				$fullPath = "$prefixPath/$subname.php";
-				$realPath = stream_resolve_include_path($fullPath);
-				if ($realPath === false)
-					continue;
-				$included = include($realPath);
-				if ($included !== false) {
-					// the file is loaded
-					return;
+				// extract the relative class name
+				$relativeClass = mb_substr($name, $pos + 1);
+				$relativeClass = str_replace('\\', DIRECTORY_SEPARATOR, $relativeClass);
+				// convert the subname into a path
+				$file = $prefixPath . DIRECTORY_SEPARATOR . $relativeClass . '.php';
+				// check if the prefix is absolute or relative
+				if (TµFile::isAbsolute($prefixPath)) {
+					// check if the file exists directly
+					if (file_exists($file)) {
+						require($file);
+						return;
+					}
+				} else {
+					// relative prefix, iterate through include paths
+					foreach (self::$_includePaths as $includePath) {
+						// convert the relative subname into an absolute path
+						$path = $includePath . DIRECTORY_SEPARATOR . $file;
+						// check if the file exists directly
+						if (file_exists($path)) {
+							require($path);
+							return;
+						}
+					}
 				}
 			}
-			// not found in namespaces
 		}
+		// fallback: look in the global include path (PSR-0 style or simple include)
 		$path = str_replace('\\', DIRECTORY_SEPARATOR, ltrim($name, '\\')) . '.php';
+		// check if the file exists in a defined include path
+		foreach (self::$_includePaths as $includePath) {
+			$file = $includePath . DIRECTORY_SEPARATOR . $path;
+			if (file_exists($file)) {
+				require($file);
+				return;
+			}
+		}
+		// fallback: this handles system-wide libraries (e.g. /usr/share/php)
 		$realPath = stream_resolve_include_path($path);
-		if (!$realPath)
-			return;
-		require($realPath);
+		if ($realPath)
+			require($realPath);
 	}
 	/**
-	 * Add include path(s).
+	 * Add include path(s) used to load objects with the autoloader.
 	 * @param	string|array	$path	Include path, or list of include paths, or associative array of namespaces associated to paths.
 	 * @throws	\Exception	If the parameter is not valid.
 	 */
@@ -111,12 +134,32 @@ class Autoload {
 		if (is_string($path))
 			$path = [$path];
 		foreach ($path as $ns => $pathChunk) {
-			if (empty(trim($pathChunk)))
+			$pathChunk = trim($pathChunk);
+			if (empty($pathChunk))
 				continue;
-			if (is_string($ns))
-				self::$_namespaces['\\' . trim($ns, '\\')] = $pathChunk;
-			else
-				set_include_path($pathChunk . PATH_SEPARATOR . get_include_path());
+			// check if it is a namespace mapping
+			if (is_string($ns)) {
+				// ensure the path has no trailing slash (standardization)
+				self::$_namespaces['\\' . trim($ns, '\\')] = rtrim($pathChunk, '/\\');
+			} else {
+				// it's a global include path
+				self::$_includePaths[] = rtrim($pathChunk, '/\\');
+			}
+		}
+	}
+	/**
+	 * Add global include path(s) that will be available to all PHP source code.
+	 * @param	string|array	$path	Include path, or list of include paths, or associative array of namespaces associated to paths.
+	 * @throws	\Exception	If the parameter is not valid.
+	 */
+	static public function addPhpIncludePath(string|array $path) : void {
+		if (is_string($path))
+			$path = [$path];
+		foreach ($path as $pathChunk) {
+			$pathChunk = trim($pathChunk);
+			if (empty($pathChunk))
+				continue;
+			set_include_path($pathChunk . PATH_SEPARATOR . get_include_path());
 		}
 	}
 }

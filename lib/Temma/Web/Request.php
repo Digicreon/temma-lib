@@ -3,18 +3,23 @@
 /**
  * Request
  * @author	Amaury Bouchard <amaury@amaury.net>
- * @copyright	© 2007-2023, Amaury Bouchard
+ * @copyright	© 2007-2026, Amaury Bouchard
  */
 
 namespace Temma\Web;
 
 use \Temma\Base\Log as TµLog;
+use \Temma\Utils\DataFilter as TµDataFilter;
 use \Temma\Exceptions\Framework as TµFrameworkException;
+use \Temma\Exceptions\Application as TµApplicationException;
 
 /**
  * Object use to manage HTTP requests.
  */
 class Request {
+	/* ********** REQUEST PROPERTIES ********** */
+	/** Accepted formats ("Accept" HTTP header). */
+	private ?array $_acceptedFormats = null;
 	/** PathInfo data. */
 	private string $_pathInfo;
 	/** HTTP method of the request. */
@@ -93,7 +98,7 @@ class Request {
 		$this->_action = array_shift($chunkedUri);
 		// remaining elements are action's parameters
 		$this->_params = $chunkedUri;
-		/* Extraction of the path from the site root. */
+		// extraction of the path from the site root
 		$this->_sitePath = dirname($_SERVER['SCRIPT_NAME']);
 	}
 
@@ -104,6 +109,38 @@ class Request {
 	 */
 	public function isAjax() : bool {
 		return (strtolower($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') === 'xmlhttprequest');
+	}
+	/**
+	 * Returns the list of accepted formats.
+	 * @return	array	The list of accepted formats.
+	 */
+	public function getAcceptedFormats() : array {
+		if (is_null($this->_acceptedFormats)) {
+			// extraction of the Accept HTTP header value
+			$this->_acceptedFormats = array_map(function($format) {
+				return (trim(explode(';', $format)[0]));
+			}, explode(',', ($_SERVER['HTTP_ACCEPT'] ?? '')));
+			if (!strcasecmp(($_SERVER['HTTP_X_REQUESTED_WITH'] ?? ''), 'XMLHttpRequest')) {
+				array_unshift($this->_acceptedFormats, 'application/json');
+				$this->_acceptedFormats = array_unique($this->_acceptedFormats);
+			}
+		}
+		return ($this->_acceptedFormats);
+	}
+	/**
+	 * Tell if a content-type is accepted by the client browser.
+	 * @param	string	$requestedFormat	The requested format (in the form "image/png" or "image").
+	 * @return	bool	True if the requested format is supported.
+	 */
+	public function isAcceptedFormat(string $requestedFormat) : bool {
+		$requestedFormat = explode('/', $requestedFormat);
+		$requestedFormat[1] ??= '*';
+		$acceptedFormats = $this->getAcceptedFormats();
+		foreach ($acceptedFormats as $acceptedFormat) {
+			if (\Temma\Utils\Text::mimeTypesMatch($requestedFormat, $acceptedFormat))
+				return (true);
+		}
+		return (false);
 	}
 	/**
 	 * Returns the pathInfo.
@@ -137,8 +174,12 @@ class Request {
 	 * Returns parameters count.
 	 * @return	int	The count.
 	 */
-	public function getNbrParams() : int {
+	public function getParamCount() : int {
 		return (is_array($this->_params) ? count($this->_params) : 0);
+	}
+	/** Alias of getParamCount() for backward compatibility. */
+	public function getNbrParams() : int {
+		return ($this->getParamCount());
 	}
 	/**
 	 * Returns action parameters.
@@ -206,5 +247,169 @@ class Request {
 	public function setParam(int $index, string $value) : void {
 		$this->_params[$index] = $value;
 	}
-}
 
+	/* ***************** VALIDATION *************** */
+	/**
+	 * Validate action parameters.
+	 * @param	null|string|array	$contract	Contract to validate the parameters: name of the contract defined in the configuration file,
+	 *							or name of the validation object, or list of contracts (one contract per validated parameter).
+	 * @param	bool			$strict		(optional) True to use strict matching. False by default.
+	 * @param	mixed			&$output	(optional) Reference to output variable.
+	 * @throws	\Temma\Exceptions\IO		If the contracts are not valid.
+	 * @throws	\Temma\Exceptions\Application	If the parameters are not valid.
+	 */
+	public function validateParams(null|string|array $contract, bool $strict=false, mixed &$output=null) : void {
+		if (is_array($contract)) {
+			$contract = [
+				'type'   => 'list',
+				'values' => $contract,
+			];
+		}
+		$params = $this->getParams();
+		$params = TµDataFilter::process($params, $contract, $strict, output: $output);
+		$this->setParams($params);
+	}
+	/**
+	 * Validate GET and POST input.
+	 * @param	null|string|array	$contract	Contract to validate the parameters: name of the contract defined in the configuration file,
+	 *							or name of the validation object, or associative array (parameter names as keys,
+	 *							with associated contracts).
+	 * @param	?string			$source		(optional) Source of the parameters ('GET', 'POST'). If null, checks both.
+	 * @param	bool			$strict		(optional) True to use strict matching. False by default.
+	 * @param	mixed			&$output	(optional) Reference to output variable.
+	 * @throws	\Temma\Exceptions\Application	If the parameters are not valid.
+	 * @see		https://www.temma.net/en/documentation/helper-datafilter
+	 */
+	public function validateInput(null|string|array $contract, ?string $source=null, bool $strict=false, mixed &$output=null) : void {
+		$source = strtoupper($source ?? '');
+		$checkGet = ($source === 'GET' || ($source === '' && !empty($_GET)));
+		$checkPost = ($source === 'POST' || ($source === '' && !empty($_POST)));
+		// optimize contract
+		if (is_array($contract)) {
+			$contract = [
+				'type' => 'assoc',
+				'keys' => $contract,
+			];
+		}
+		// validate
+		if ($checkGet)
+			$_GET = TµDataFilter::process($_GET, $contract, $strict, output: $output);
+		if ($checkPost)
+			$_POST = TµDataFilter::process($_POST, $contract, $strict, output: $output);
+	}
+	/**
+	 * Validate the request payload.
+	 * @param	null|string|array	$contract	Contract to validate the payload: name of the contract defined in the configuration file,
+	 *							or name of the validation object, or contract definition (as needed by the DataFilter object).
+	 * @param	bool			$strict		(optional) True to use strict matching. False by default.
+	 * @param	mixed			&$output	(optional) Reference to output variable.
+	 * @return	mixed	The validated data.
+	 * @throws	\Temma\Exceptions\Application	If the payload is not valid.
+	 * @see		https://www.temma.net/en/documentation/helper-datafilter
+	 */
+	public function validatePayload(null|string|array $contract, bool $strict=false, mixed &$output=null) : mixed {
+		$inputSource = (php_sapi_name() === 'cli') ? 'php://stdin' : 'php://input';
+		$input = file_get_contents($inputSource);
+		return (TµDataFilter::process($input, $contract, $strict, output: $output));
+	}
+	/**
+	 * Validate uploaded files.
+	 * @param	array	$contract	Contract to validate the files.
+	 * @param	bool	$strict		(optional) True to use strict matching. False by default.
+	 * @throws	\Temma\Exceptions\Application	If the files are not valid.
+	 */
+	public function validateFiles(array $contract, bool $strict=false) : void {
+		// process each contract key
+		$hasWildcard = false;
+		$wildcardContract = null;
+		$contractKeys = [];
+		foreach ($contract as $key => $subcontract) {
+			// check for wildcard (as key or as value in indexed array)
+			if ($key === '...' || $key === '…') {
+				$hasWildcard = true;
+				$wildcardContract = ($subcontract !== '...' && $subcontract !== '…') ? $subcontract : null;
+				continue;
+			}
+			if ($subcontract === '...' || $subcontract === '…') {
+				$hasWildcard = true;
+				continue;
+			}
+			// check for optional suffix
+			$optional = false;
+			if (str_ends_with($key, '?')) {
+				$optional = true;
+				$key = mb_substr($key, 0, -1);
+			}
+			// store the key (for later use)
+			$contractKeys[$key] = true;
+			// check if file exists
+			if (!isset($_FILES[$key])) {
+				if (!$optional)
+					throw new TµApplicationException("Mandatory file '$key' is missing.", TµApplicationException::API);
+				continue;
+			}
+			// check for single file or multiple files
+			if (!is_array($_FILES[$key]['name'])) {
+				// handle single file
+				$content = file_get_contents($_FILES[$key]['tmp_name']);
+				$output = null;
+				TµDataFilter::process($content, $subcontract, $strict, output: $output);
+				// update MIME type in $_FILES
+				if (isset($output['mime']))
+					$_FILES[$key]['type'] = $output['mime'];
+			} else {
+				// handle multiple files (array)
+				foreach ($_FILES[$key]['name'] as $i => $name) {
+					$content = file_get_contents($_FILES[$key]['tmp_name'][$i]);
+					$output = null;
+					TµDataFilter::process($content, $subcontract, $strict, output: $output);
+					// update MIME type in $_FILES
+					if (isset($output['mime']))
+						$_FILES[$key]['type'][$i] = $output['mime'];
+				}
+			}
+		}
+		// handle extra files
+		if ($hasWildcard && $wildcardContract) {
+			// validate extra files with wildcard contract
+			foreach (array_keys($_FILES) as $fileKey) {
+				if (isset($contractKeys[$fileKey]))
+					continue;
+				// validate extra file
+				if (!is_array($_FILES[$fileKey]['name'])) {
+					$content = file_get_contents($_FILES[$fileKey]['tmp_name']);
+					$output = null;
+					TµDataFilter::process($content, $wildcardContract, $strict, output: $output);
+					if (isset($output['mime']))
+						$_FILES[$fileKey]['type'] = $output['mime'];
+				} else {
+					foreach ($_FILES[$fileKey]['name'] as $i => $name) {
+						$content = file_get_contents($_FILES[$fileKey]['tmp_name'][$i]);
+						$output = null;
+						TµDataFilter::process($content, $wildcardContract, $strict, output: $output);
+						if (isset($output['mime']))
+							$_FILES[$fileKey]['type'][$i] = $output['mime'];
+					}
+				}
+			}
+		} else if (!$hasWildcard) {
+			if ($strict) {
+				// strict mode: throw exception on extra files
+				$extraFiles = [];
+				$fileKeys = array_keys($_FILES);
+				foreach ($fileKeys as $fileKey) {
+					if (!isset($contractKeys[$fileKey]))
+						$extraFiles[] = $fileKey;
+				}
+				if ($extraFiles)
+					throw new TµApplicationException("Extra file(s) '" . implode("', '", $extraFiles) . "' are not allowed.", TµApplicationException::API);
+			} else {
+				// non-strict mode: remove extra files
+				foreach (array_keys($_FILES) as $fileKey) {
+					if (!isset($contractKeys[$fileKey]))
+						unset($_FILES[$fileKey]);
+				}
+			}
+		}
+	}
+}

@@ -3,7 +3,7 @@
 /**
  * Framework
  * @author	Amaury Bouchard <amaury@amaury.net>
- * @copyright	© 2007-2023, Amaury Bouchard
+ * @copyright	© 2007-2026, Amaury Bouchard
  */
 
 namespace Temma\Web;
@@ -22,7 +22,7 @@ use \Temma\Exceptions\IO as TµIOException;
  */
 class Framework {
 	/** Version number of Temma's last tagged release. */
-	const TEMMA_VERSION = '2.14.0';
+	const TEMMA_VERSION = '2.16.0';
 	/** Name of the root action. */
 	const CONTROLLERS_ROOT_ACTION = '__invoke';
 	/** Name of the proxy action. */
@@ -102,11 +102,15 @@ class Framework {
 				'temma'    => $this,
 			]);
 		}
-		// configure the loader with the defined aliases and prefixes
+		// inject the loader into the DataFilter
+		\Temma\Utils\Validation\DataFilter::setLoader($this->_loader);
+		// configure the loader with the defined configuration (preload, aliases and prefixes)
+		if (isset($this->_config->loaderPreload))
+			$this->_loader->set($this->_config->loaderPreload);
 		if (isset($this->_config->loaderAliases))
-			$this->_loader->setAliases($this->_config->loaderAliases);
+			$this->_loader->alias($this->_config->loaderAliases);
 		if (isset($this->_config->loaderPrefixes))
-			$this->_loader->setPrefixes($this->_config->loaderPrefixes);
+			$this->_loader->prefix($this->_config->loaderPrefixes);
 		// initialization of the log system
 		$this->_configureLog();
 		// check the requested URL and log it
@@ -116,10 +120,13 @@ class Framework {
 			exit();
 		} else if (($_SERVER['REQUEST_URI'] ?? null))
 			TµLog::log('Temma/Web', 'DEBUG', "Processing URL '" . $_SERVER['REQUEST_URI'] . "'.");
-		// connect to data sources
+		// connect to data sources and add them to the loader
 		$this->_dataSources = new \Temma\Utils\Registry();
 		foreach ($this->_config->dataSources as $name => $dsParam) {
-			$this->_dataSources[$name] = \Temma\Base\Datasource::metaFactory($dsParam);
+			$dataSource = \Temma\Base\Datasource::metaFactory($dsParam);
+			$this->_dataSources[$name] = $dataSource;
+			if (!in_array($name, ['config', 'request', 'response', 'temma', 'session', 'dataSources', 'controller']))
+				$this->_loader[$name] = $dataSource;
 		}
 		$this->_loader['dataSources'] = $this->_dataSources;
 		// get the session if needed
@@ -376,27 +383,23 @@ class Framework {
 			TµLog::disable();
 			return;
 		}
-		// checked if a log file was set
+		// check if a log file was set
 		if ($logPath)
 			TµLog::setLogFile($logPath);
-		// check is a log manager was set
+		// check if a log manager was set
 		if ($logManager) {
 			if (is_string($logManager))
 				$logManager = [$logManager];
 			foreach ($logManager as $managerName) {
 				// check if the object exists and implements the right interface
 				try {
-					$reflect = new \ReflectionClass($managerName);
-					if (!$reflect->implementsInterface('\Temma\Web\LogManager'))
+					$manager = $this->_loader->get($managerName);
+					if (!is_a($manager, '\Temma\Web\LogManager'))
 						throw new TµFrameworkException("Log manager '$managerName' doesn't implements \Temma\Web\LogManager interface.", TµFrameworkException::CONFIG);
-					if ($reflect->implementsInterface('\Temma\Base\Loadable'))
-						$manager = new $managerName($this->_loader);
-					else
-						$manager = new $managerName();
 					TµLog::addCallback(function($traceId, $text, $priority, $class) use ($manager) {
-						return $manager->log($traceId, $text, $priority, $class);
+						$manager->log($traceId, $text, $priority, $class);
 					});
-				} catch (\ReflectionException $re) {
+				} catch (\Throwable $re) {
 					throw new TµFrameworkException("Log manager '$managerName' doesn't exist.", TµFrameworkException::CONFIG);
 				}
 			}
@@ -481,8 +484,8 @@ class Framework {
 			TµLog::log('Temma/Web', 'INFO', "No controller found, use the default controller.");
 			$this->_objectControllerName = $this->_config->defaultController;
 			if (empty($this->_objectControllerName)) {
-				TµLog::log('Temma/Wen', 'ERROR', "No defined controller.");
-				throw new TµHttpException("No defifned controller.", 404);
+				TµLog::log('Temma/Web', 'ERROR', "No defined controller.");
+				throw new TµHttpException("No defined controller.", 404);
 			}
 		}
 		// if the controller object's name doesn't start with a backslash, prepend the default namespace
@@ -668,7 +671,7 @@ class Framework {
 			if (empty($template)) {
 				$controller = $this->_controllerName ? $this->_controllerName : $this->_objectControllerName;
 				$action = $this->_actionName ? $this->_actionName : self::CONTROLLERS_PROXY_ACTION;
-				$template = $controller . '/' . $action . self::TEMPLATE_EXTENSION;
+				$template = ltrim($controller, '\\') . '/' . $action . self::TEMPLATE_EXTENSION;
 			}
 			$templatePrefix = trim(($this->_response->getTemplatePrefix() ?? ''), '/');
 			if (!empty($templatePrefix))

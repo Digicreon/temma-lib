@@ -3,7 +3,7 @@
 /**
  * Config
  * @author	Amaury Bouchard <amaury@amaury.net>
- * @copyright	© 2007-2024, Amaury Bouchard
+ * @copyright	© 2007-2026, Amaury Bouchard
  */
 
 namespace Temma\Web;
@@ -98,14 +98,18 @@ class Config {
 	protected ?string $_viewsPath = null;
 	/** Path to the templates directory. */
 	protected ?string $_templatesPath = null;
-	/** List of paths that must be added to PHP include paths. */
+	/** List of paths that must be added to autoloader include paths. */
 	protected ?array $_pathsToInclude = null;
+	/** List of paths that must be added to PHP include paths. */
+	protected ?array $_phpPathsToInclude = null;
 	/** Path to the "var" directory. */
 	protected ?string $_varPath = null;
 	/** Path to the web root directory. */
 	protected ?string $_webPath = null;
 	/** Name of the loader object. */
 	protected ?string $_loader = null;
+	/** Array of loader preloaded data. */
+	protected ?array $_loaderPreload = null;
 	/** Array of loader aliases. */
 	protected ?array $_loaderAliases = null;
 	/** Array of loader prefixes. */
@@ -141,6 +145,7 @@ class Config {
 	public function __construct(string $appPath, ?array $attributes=null) {
 		$this->_appPath = $appPath;
 		$this->_etcPath = $this->_appPath . DIRECTORY_SEPARATOR . self::ETC_DIR;
+		$this->_phpPathsToInclude = [$this->_appPath . DIRECTORY_SEPARATOR . self::INCLUDES_DIR];
 		// management of initialization attributes
 		if ($attributes) {
 			foreach ($attributes as $attrName => $attrValue) {
@@ -242,13 +247,24 @@ class Config {
 			$pathsToInclude[] = $viewsPath;
 			$this->_viewsPath = $viewsPath;
 		}
-		// paths defined in the configuration
-		if (isset($ini['includePaths']) && is_array($ini['includePaths']))
-			$pathsToInclude = array_merge($pathsToInclude, $ini['includePaths']);
-		// namespace paths defined in the configuration
+		// include paths defined in the configuration
+		if (isset($ini['includePaths'])) {
+			if (is_string($ini['includePaths']))
+				$ini['includePaths'] = [$ini['includePAths']];
+			if (is_array($ini['includePaths']))
+				$pathsToInclude = array_merge($pathsToInclude, $ini['includePaths']);
+		}
+		// namespace paths defined in the configuration (for backward compatbility)
 		if (isset($ini['namespacePaths']) && is_array($ini['namespacePaths']))
 			$pathsToInclude = array_merge($pathsToInclude, $ini['namespacePaths']);
 		$this->_pathsToInclude = $pathsToInclude;
+		// PHP include paths
+		if (isset($ini['phpIncludePaths'])) {
+			if (is_string($ini['phpIncludePaths']))
+				$ini['phpIncludePaths'] = [$ini['phpIncludePaths']];
+			if (is_array($ini['phpIncludePaths']))
+				$this->_phpPathsToInclude = array_merge($ini['phpIncludePaths'], $this->_phpPathsToInclude);
+		}
 
 		// default loader
 		if (empty($ini['application']['loader']))
@@ -276,6 +292,11 @@ class Config {
 		// check for the need of loading the sessions
 		if (isset($ini['application']['enableSessions']) && $ini['application']['enableSessions'] === false)
 			$this->_enableSessions = false;
+
+		// register DataFilter aliases
+		if (isset($ini['validationTypes']) && is_array($ini['validationTypes']))
+			\Temma\Utils\Validation\DataFilter::registerAlias($ini['validationTypes']);
+
 		// define the session name
 		$this->_sessionName = ($ini['application']['sessionName'] ?? null) ?: self::SESSION_NAME;
 		// define the data source that stores the sessions
@@ -295,6 +316,7 @@ class Config {
 		}
 
 		// definitions
+		$this->_loaderPreload = $ini['x-loader']['preload'] ?? null;
 		$this->_loaderAliases = $ini['x-loader']['aliases'] ?? null;
 		$this->_loaderPrefixes = $ini['x-loader']['prefixes'] ?? null;
 		$this->_logManager = $ini['application']['logManager'] ?? null;
@@ -398,9 +420,12 @@ class Config {
 	}
 	/** Initialize the PHP include paths when the configuration is read. */
 	protected function _initIncludePaths() : void {
-		$pathsToInclude = $this->_executorConfig ? $this->_executorConfig->_pathsToInclude : $this->_pathsToInclude;
-		if ($pathsToInclude)
-			\Temma\Base\Autoload::addIncludePath($pathsToInclude);
+		$paths = $this->_executorConfig ? $this->_executorConfig->_pathsToInclude : $this->_pathsToInclude;
+		if ($paths)
+			\Temma\Base\Autoload::addIncludePath($paths);
+		$paths = $this->_executorConfig ? $this->_executorConfig->_phpPathsToInclude : $this->_phpPathsToInclude;
+		if ($paths)
+			\Temma\Base\Autoload::addPhpIncludePath($paths);
 	}
 }
 

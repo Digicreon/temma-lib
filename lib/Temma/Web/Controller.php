@@ -194,20 +194,24 @@ class Controller implements \ArrayAccess {
 	}
 	/**
 	 * Define an HTTP redirection (302).
-	 * @param	?string	$url	Redirection URL, or null to remove the redirection.
+	 * @param	?string	$url		(optional) Redirection URL, or null to remove the redirection.
+	 * @param	bool	$referer	(optional) True to use the HTTP REFERER as redirection URL, with $url as fallback.
+	 *					False by default.
 	 * @return	int	self::EXEC_HALT (useful value to return from the controller).
 	 */
-	final protected function _redirect(?string $url) : int {
-		$this->_response->setRedirection($url);
+	final protected function _redirect(?string $url=null, bool $referer=false) : int {
+		$this->_response->setRedirection($url, false, $referer);
 		return (self::EXEC_HALT);
 	}
 	/**
 	 * Define an HTTP redirection (301).
-	 * @param	string	$url	Redirection URL.
+	 * @param	?string	$url		(optional) Redirection URL.
+	 * @param	bool	$referer	(optional) True to use the HTTP REFERER as redirection URL, with $url as fallback.
+	 *					False by default.
 	 * @return	int	self::EXEC_HALT (useful value to return from the controller).
 	 */
-	final protected function _redirect301(string $url) : int {
-		$this->_response->setRedirection($url, true);
+	final protected function _redirect301(?string $url=null, bool $referer=false) : int {
+		$this->_response->setRedirection($url, true, $referer);
 		return (self::EXEC_HALT);
 	}
 	/**
@@ -294,8 +298,8 @@ class Controller implements \ArrayAccess {
 	final public function _subProcess(string $controller, ?string $action=null, ?array $parameters=null) : ?int {
 		TµLog::log('Temma/Web', 'DEBUG', "Subprocess of '$controller'::'$action'.");
 		// checks
-		if (!class_exists($controller) || !is_subclass_of($controller, '\Temma\Web\Controller')) {
-			TµLog::log('Temma/Web', 'ERROR', "Sub-controller '$controller' doesn't exists.");
+		if (!is_subclass_of($controller, '\Temma\Web\Controller')) {
+			TµLog::log('Temma/Web', 'ERROR', "Sub-controller '$controller' doesn't exist.");
 			throw new TµHttpException("Unable to find controller '$controller'.", 404);
 		}
 
@@ -310,7 +314,7 @@ class Controller implements \ArrayAccess {
 		$method = \Temma\Web\Framework::CONTROLLERS_INIT_METHOD;
 		try {
 			$status = $obj->$method();
-		} catch (\Error $e) {
+		} catch (\Throwable $e) {
 			TµLog::log('Temma/Web', 'ERROR', "Unable to initialize the controller '$controller' [" . $e->getFile() . ':' . $e->getLine() . ']: ' . $e->getMessage());
 			throw new TµHttpException("Unable to initialize the controller '$controller'.", 500);
 		}
@@ -353,10 +357,15 @@ class Controller implements \ArrayAccess {
 		/* ********** attributes on the action ********** */
 		$reflectionMethod = $isDefaultAction ? \Temma\Web\Framework::CONTROLLERS_DEFAULT_ACTION : $method;
 		$actionReflection = new \ReflectionMethod($obj, $reflectionMethod);
-		$attributes = $actionReflection->getAttributes(null, \ReflectionAttribute::IS_INSTANCEOF);
+		$attributes = $actionReflection->getAttributes(\Temma\Web\Attribute::class, \ReflectionAttribute::IS_INSTANCEOF);
 		foreach ($attributes as $attribute) {
 			TµLog::log('Temma/Web', 'DEBUG', "Action attribute '{$attribute->getName()}'.");
-			$attribute->newInstance();
+			// instantiate the attribute
+			$instance = $attribute->newInstance();
+			// initialize the attribute
+			$instance->init($this->_loader);
+			// apply the attribute
+			$instance->apply($actionReflection);
 		}
 
 		/* ********** execution ********** */
@@ -370,7 +379,7 @@ class Controller implements \ArrayAccess {
 		} catch (\ArgumentCountError $ace) {
 			TµLog::log('Temma/Web', 'ERROR', "$controller::$method: " . $ace->getMessage());
 			throw new TµHttpException("$controller::$method: " . $ace->getMessage(), 404);
-		} catch (\Error $e) {
+		} catch (\Throwable $e) {
 			TµLog::log('Temma/Web', 'ERROR', "$controller::$method" . '[' . $e->getFile() . ':' . $e->getLine() . ']: ' . $e->getMessage());
 			throw new TµHttpException("Unable to execute method '$method' on controller '$controller'.", 404);
 		}
@@ -381,7 +390,7 @@ class Controller implements \ArrayAccess {
 		$method = \Temma\Web\Framework::CONTROLLERS_FINALIZE_METHOD;
 		try {
 			$status = $obj->$method();
-		} catch (\Error $e) {
+		} catch (\Throwable $e) {
 			TµLog::log('Temma/Web', 'ERROR', "Unable to finalize the controller '$controller' [" . $e->getFile() . ':' . $e->getLine() . ']: ' . $e->getMessage());
 			throw new TµHttpException("Unable to finalize the controller '$controller'.", 500);
 		}

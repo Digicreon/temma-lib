@@ -3,7 +3,7 @@
 /**
  * Memcache
  * @author	Amaury Bouchard <amaury@amaury.net>
- * @copyright	© 2009-2024, Amaury Bouchard
+ * @copyright	© 2009-2026, Amaury Bouchard
  * @link	https://www.temma.net/documentation/datasource-memcache
  */
 
@@ -183,10 +183,10 @@ class Memcache extends \Temma\Base\Datasource implements \ArrayAccess {
 			return (0);
 		$this->connect();
 		$stats = $this->_memcache->getStats();
-		$nbr = 0;
+		$count = 0;
 		foreach ($stats as $stat)
-			$nbr += $stat['curr_items'] ?? 0;
-		return ($nbr);
+			$count += $stat['curr_items'] ?? 0;
+		return ($count);
 	}
 
 	/* ********** STANDARD REQUESTS ********** */
