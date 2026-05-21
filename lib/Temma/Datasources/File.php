@@ -101,13 +101,18 @@ class File extends \Temma\Base\Datasource {
 	/* ********** ARRAY-LIKE REQUESTS ********** */
 	/**
 	 * Return the number of files.
+	 * @param	?string	$pattern	(optional) Glob pattern to match. Null to count all files.
 	 * @return 	int	The number of files.
 	 */
-	public function count() : int {
+	public function count(?string $pattern=null) : int {
 		if (!$this->_enabled)
 			return (0);
-		$fi = new \FilesystemIterator($this->_rootPath);
-		return (iterator_count($fi));
+		if ($pattern === null) {
+			$fi = new \FilesystemIterator($this->_rootPath);
+			return (iterator_count($fi));
+		}
+		$pattern = $this->_cleanPath($pattern);
+		return (count(glob($this->_rootPath . '/' . $pattern)));
 	}
 
 	/* ********** STANDARD REQUESTS ********** */
@@ -161,20 +166,37 @@ class File extends \Temma\Base\Datasource {
 	/* ********** RAW REQUESTS ********** */
 	/**
 	 * Search all files matching a pattern.
-	 * @param	string	$pattern	The pattern.
-	 * @param	bool	$getValues	(optional) True to fetch the associated values. False by default.
+	 * @param	string			$pattern	The pattern.
+	 * @param	bool			$getValues	(optional) True to fetch the associated values. False by default.
+	 * @param	null|bool|string|array	$sort		(optional) Sort criteria:
+	 *							- null: natural alphabetical order (default, from glob()).
+	 *							- true: reverse alphabetical order.
+	 *							- false: random order.
+	 *							- string/array: not supported, triggers an exception.
+	 * @param	int			$offset		(optional) Number of items to skip. 0 by default.
+	 * @param	int			$limit		(optional) Maximum number of items to return. 0 means no limit.
 	 * @return	array	List of keys, or associative array of key-value pairs.
 	 * @throws	\Exception	If an error occured.
+	 * @throws	\Temma\Exceptions\Database	If $sort is a string or an array.
 	 */
-	public function find(string $pattern, bool $getValues=false) : array {
+	public function find(string $pattern, bool $getValues=false, null|bool|string|array $sort=null, int $offset=0, int $limit=0) : array {
 		if (!$this->_enabled)
 			return ([]);
+		if (is_string($sort) || is_array($sort))
+			throw new \Temma\Exceptions\Database("File datasource does not support field-based sort.", \Temma\Exceptions\Database::FUNDAMENTAL);
 		$pattern = $this->_cleanPath($pattern);
 		$files = glob($this->_rootPath . '/' . $pattern);
+		if ($files === false)
+			$files = [];
+		if ($sort === false)
+			shuffle($files);
+		else if ($sort === true)
+			$files = array_reverse($files);
+		if ($offset > 0 || $limit > 0)
+			$files = array_slice($files, $offset, $limit ?: null);
 		if (!$getValues)
 			return ($files);
-		$files = $this->mRead($files);
-		return ($files);
+		return ($this->mRead($files));
 	}
 	/**
 	 * Get a file. The raw content of the file is returned (not JSON-decoded).

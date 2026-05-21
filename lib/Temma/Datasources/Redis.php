@@ -225,13 +225,23 @@ class Redis extends \Temma\Base\Datasource {
 	/* ********** ARRAY-LIKE REQUESTS ********* */
 	/**
 	 * Return the number of keys.
+	 * @param	?string	$pattern	(optional) Pattern to match. Null to count all keys.
 	 * @return	int	The number of stored keys.
 	 */
-	public function count() : int {
+	public function count(?string $pattern=null) : int {
 		if (!$this->_enabled)
 			return (0);
 		$this->connect();
-		return ($this->_ndb->dbSize());
+		if ($pattern === null)
+			return ($this->_ndb->dbSize());
+		$count = 0;
+		$it = null;
+		do {
+			$keys = $this->_ndb->scan($it, $pattern);
+			if (is_array($keys))
+				$count += count($keys);
+		} while ($it > 0);
+		return ($count);
 	}
 
 	/* ********** STANDARD REQUESTS ********** */
@@ -292,21 +302,56 @@ class Redis extends \Temma\Base\Datasource {
 	/* ********** RAW REQUESTS ********** */
 	/**
 	 * Search keys from a pattern.
-	 * @param	string	$pattern	The pattern to match.
-	 * @param	bool	$getValues	(optional) True to fetch the associated values. False by default.
+	 * @param	string			$pattern	The pattern to match.
+	 * @param	bool			$getValues	(optional) True to fetch the associated values. False by default.
+	 * @param	null|bool|string|array	$sort		(optional) Sort criteria. Null and true are silently ignored
+	 *							(Redis SCAN does not guarantee any order). False shuffles the result
+	 *							(all matching keys are fetched before applying offset/limit). String and
+	 *							array forms are not supported and trigger an exception.
+	 * @param	int			$offset		(optional) Number of items to skip. 0 by default.
+	 * @param	int			$limit		(optional) Maximum number of items to return. 0 means no limit.
 	 * @return	array	List of keys, or associative array of key-value pairs.
+	 * @throws	\Temma\Exceptions\Database	If $sort is a string or an array.
 	 */
-	public function find(string $pattern, bool $getValues=false) : array {
+	public function find(string $pattern, bool $getValues=false, null|bool|string|array $sort=null, int $offset=0, int $limit=0) : array {
 		if (!$this->_enabled)
 			return ([]);
+		if (is_string($sort) || is_array($sort))
+			throw new \Temma\Exceptions\Database("Redis datasource does not support field-based sort.", \Temma\Exceptions\Database::FUNDAMENTAL);
 		$this->connect();
 		$result = [];
 		$it = null;
-		while (($keys = $this->_ndb->scan($it, $pattern))) {
-			if ($getValues)
-				$keys = $this->mRead($keys);
-			$result = array_merge($result, $keys);
+		if ($sort === false) {
+			do {
+				$keys = $this->_ndb->scan($it, $pattern);
+				if (is_array($keys)) {
+					foreach ($keys as $key)
+						$result[] = $key;
+				}
+			} while ($it > 0);
+			shuffle($result);
+			$result = array_slice($result, $offset, $limit > 0 ? $limit : null);
+		} else {
+			$skipped = 0;
+			$collected = 0;
+			do {
+				$keys = $this->_ndb->scan($it, $pattern);
+				if (!is_array($keys))
+					continue;
+				foreach ($keys as $key) {
+					if ($skipped < $offset) {
+						$skipped++;
+						continue;
+					}
+					$result[] = $key;
+					$collected++;
+					if ($limit > 0 && $collected >= $limit)
+						break 2;
+				}
+			} while ($it > 0);
 		}
+		if ($getValues && $result)
+			$result = $this->mRead($result);
 		return ($result);
 	}
 	/**
@@ -393,27 +438,63 @@ class Redis extends \Temma\Base\Datasource {
 	/* ********** KEY-VALUE REQUESTS ********** */
 	/**
 	 * Return a list of keys that match a pattern.
-	 * @param	string	$pattern	The pattern to match. Use the asterisk as wildcard.
-	 * @param	bool	$getValues	(optional) True to fetch the associated values. False by default.
+	 * @param	string			$pattern	The pattern to match. Use the asterisk as wildcard.
+	 * @param	bool			$getValues	(optional) True to fetch the associated values. False by default.
+	 * @param	null|bool|string|array	$sort		(optional) Sort criteria. Null and true are silently ignored
+	 *							(Redis SCAN does not guarantee any order). False shuffles the result
+	 *							(all matching keys are fetched before applying offset/limit). String and
+	 *							array forms are not supported and trigger an exception.
+	 * @param	int			$offset		(optional) Number of items to skip. 0 by default.
+	 * @param	int			$limit		(optional) Maximum number of items to return. 0 means no limit.
 	 * @return	array	List of keys, or associative array of key-value pairs. Values are JSON-decoded.
+	 * @throws	\Temma\Exceptions\Database	If $sort is a string or an array.
 	 */
-	public function search(string $pattern, bool $getValues=false) : array {
+	public function search(string $pattern, bool $getValues=false, null|bool|string|array $sort=null, int $offset=0, int $limit=0) : array {
 		if (!$this->_enabled)
 			return ([]);
+		if (is_string($sort) || is_array($sort))
+			throw new \Temma\Exceptions\Database("Redis datasource does not support field-based sort.", \Temma\Exceptions\Database::FUNDAMENTAL);
 		$this->connect();
 		$result = [];
 		$it = null;
-		while (($keys = $this->_ndb->scan($it, $pattern))) {
-			if ($getValues)
-				$keys = $this->mRead($keys);
-			$result = array_merge($result, $keys);
+		if ($sort === false) {
+			do {
+				$keys = $this->_ndb->scan($it, $pattern);
+				if (is_array($keys)) {
+					foreach ($keys as $key)
+						$result[] = $key;
+				}
+			} while ($it > 0);
+			shuffle($result);
+			$result = array_slice($result, $offset, $limit > 0 ? $limit : null);
+		} else {
+			$skipped = 0;
+			$collected = 0;
+			do {
+				$keys = $this->_ndb->scan($it, $pattern);
+				if (!is_array($keys))
+					continue;
+				foreach ($keys as $key) {
+					if ($skipped < $offset) {
+						$skipped++;
+						continue;
+					}
+					$result[] = $key;
+					$collected++;
+					if ($limit > 0 && $collected >= $limit)
+						break 2;
+				}
+			} while ($it > 0);
 		}
-		array_walk($result, function(&$value, $key) {
-			if ($value === false)
-				$value = null;
-			else if (is_string($value))
-				$value = json_decode($value, true);
-		});
+		if ($getValues && $result) {
+			$result = $this->mRead($result);
+			array_walk($result, function(&$value, $key) {
+				if ($value === false)
+					$value = null;
+				else if (is_string($value))
+					$value = json_decode($value, true);
+			});
+		}
 		return ($result);
 	}
 	/**
