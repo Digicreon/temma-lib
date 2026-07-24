@@ -304,13 +304,23 @@ class Loader extends \Temma\Utils\Registry {
 	 * Add a prefix, or a list of prefixes.
 	 * @param	string|array	$name	If a string is given, it's the name of the prefix, and a prefix should be given.
 	 *					If an array is given, its key/value pairs are used to set prefixes, and the
-	 *					second parameter is not used.
+	 *					second parameter is not used. Each value could be a namespace string
+	 *					(trailing backslashes are trimmed), a callable (closure, function name,
+	 *					'Class::method' string) executed at resolution time, or a falsy value
+	 *					(null, empty string) to remove the prefix.
 	 * @param	?string		$prefix	Prefixed namespace. Could be null to remove a prefix.
 	 * @return	\Temma\Base\Loader	The current object.
 	 */
 	public function prefix(string|array $name, ?string $prefix=null) : \Temma\Base\Loader {
 		if (is_array($name)) {
-			$this->_prefixes = array_merge($this->_prefixes, $name);
+			foreach ($name as $prefixName => $value) {
+				if (!$value)
+					unset($this->_prefixes[$prefixName]);
+				else if (is_string($value))
+					$this->_prefixes[$prefixName] = rtrim($value, '\\');
+				else
+					$this->_prefixes[$prefixName] = $value;
+			}
 			return ($this);
 		}
 		if (!$prefix)
@@ -364,13 +374,17 @@ class Loader extends \Temma\Utils\Registry {
 	 * @return	mixed	The associated value, or null.
 	 */
 	public function get(string $key, mixed $default=null, bool $autoInstantiate=true) : mixed {
-		// special cases (Asynk and TµLoader)
-		if ($key == 'asynk')
-			return (new \Temma\Asynk\Client($this));
-		if ($key == '\Temma\Base\Loader' || $key == 'TµLoader')
-			return ($this);
 		// normalize
 		$key = ltrim($key, '\\');
+		// special case: Asynk client
+		if ($key == 'asynk')
+			return (new \Temma\Asynk\Client($this));
+		// special case: the current loader satisfies any request for its own class or one of its
+		// parent classes down to \Temma\Base\Loader (is_a($this, $key) is tested first because it
+		// never triggers the autoloader, unlike is_a() called on a string with $allow_string=true)
+		if ($key == 'TµLoader' ||
+		    (is_a($this, $key) && is_a($key, \Temma\Base\Loader::class, true)))
+			return ($this);
 		// circular dependency check
 		if (isset($this->_loadingStack[$key])) {
 			throw new TµLoaderException("Circular dependency detected for key: '$key'.", TµLoaderException::CIRCULAR_DEPENDENCY);
@@ -392,7 +406,7 @@ class Loader extends \Temma\Utils\Registry {
 			}
 			// loop on prefixes
 			foreach ($this->_prefixes as $prefix => $value) {
-				if (!str_starts_with($key, $prefix) || !isset($value))
+				if (!str_starts_with($key, $prefix))
 					continue;
 				$shortKey = mb_substr($key, mb_strlen($prefix));
 				if (is_callable($value) && !$value instanceof \Temma\Web\Controller) {
@@ -436,7 +450,10 @@ class Loader extends \Temma\Utils\Registry {
 	 */
 	private function _instantiate(string|callable|object $obj, mixed $default=null) : mixed {
 		// string parameter
-		if (is_string($obj)) {
+		// Loader classes are excluded: dependency resolution must never fabricate a new loader
+		// (a silently-injected empty loader is worse than a loud failure); requests matching the
+		// current loader's class are already answered by get()
+		if (is_string($obj) && !is_a($obj, \Temma\Base\Loader::class, true)) {
 			// loadable
 			if (is_subclass_of($obj, \Temma\Base\Loadable::class))
 				return (new $obj($this));
