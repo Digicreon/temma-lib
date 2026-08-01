@@ -22,7 +22,7 @@ use \Temma\Exceptions\IO as TµIOException;
  */
 class Framework {
 	/** Version number of Temma's last tagged release. */
-	const TEMMA_VERSION = '2.20.0';
+	const TEMMA_VERSION = '2.22.0';
 	/** Name of the root action. */
 	const CONTROLLERS_ROOT_ACTION = '__invoke';
 	/** Name of the proxy action. */
@@ -103,7 +103,7 @@ class Framework {
 			]);
 		}
 		// inject the loader into the DataFilter
-		\Temma\Utils\Validation\DataFilter::setLoader($this->_loader);
+		\Temma\Utils\DataFilter::setLoader($this->_loader);
 		// configure the loader with the defined configuration (preload, aliases and prefixes)
 		if (isset($this->_config->loaderPreload))
 			$this->_loader->set($this->_config->loaderPreload);
@@ -214,6 +214,10 @@ class Framework {
 				return (($processView === false) ? $this->_response->getData() : null);
 			}
 		}
+		// an EXEC_STOP status only stops the pre-plugins phase: the processing continues with the
+		// controller (unlike EXEC_HALT, which goes straight to the view)
+		if ($execStatus === \Temma\Web\Controller::EXEC_STOP)
+			$execStatus = \Temma\Web\Controller::EXEC_FORWARD;
 
 		/* ********** CONTROLLER ********** */
 		if ($this->_controllerReflection->getName() == 'Temma\Web\Controller')
@@ -239,6 +243,10 @@ class Framework {
 				return (($processView === false) ? $this->_response->getData() : null);
 			}
 		}
+		// an EXEC_STOP status only stops the controller phase: the processing continues with the
+		// post-plugins (unlike EXEC_HALT, which goes straight to the view)
+		if ($execStatus === \Temma\Web\Controller::EXEC_STOP)
+			$execStatus = \Temma\Web\Controller::EXEC_FORWARD;
 
 		/* ********** POST-PLUGINS ********** */
 		if (!$execStatus) { // $execStatus === \Temma\Web\Controller::EXEC_FORWARD || $execStatus === \Temma\Web\Controller::EXEC_FORWARD_THROWABLE

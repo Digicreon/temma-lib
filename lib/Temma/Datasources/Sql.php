@@ -148,6 +148,9 @@ class Sql extends \Temma\Base\Datasource {
 	 * @throws	\Temma\Exceptions\Database	If something went wrong.
 	 */
 	static public function factory(string $dsn) : \Temma\Datasources\Sql {
+		// SQLite: the DSN contains only the path to the database file (e.g. 'sqlite:/path/to/file.sq3' or 'sqlite::memory:')
+		if (preg_match('/^(sqlite2?):(.+)$/', $dsn, $matches))
+			return (new self($matches[1], null, null, null, null, $matches[2]));
 		// parameters extraction
 		$params = null;
 		if (!preg_match("/^([^:]+):\/\/([^:@]+):?([^@]+)?@([^\/:]+):?(\d+)?\/([^#]*)#?(.*)$/", $dsn, $matches)) {
@@ -213,7 +216,10 @@ class Sql extends \Temma\Base\Datasource {
 			// special process for Oracle
 			if ($this->_type == 'oci')
 				$pdoDsn .= 'dbname=//' . $this->_host . ':' . $this->_port . '/' . $this->_base;
-			else {
+			else if ($this->_type == 'sqlite' || $this->_type == 'sqlite2') {
+				// SQLite: the PDO DSN contains only the file path (or ':memory:')
+				$pdoDsn .= $this->_base;
+			} else {
 				// other databases
 				$pdoDsn .= 'dbname=' . $this->_base;
 				// host
@@ -296,6 +302,13 @@ class Sql extends \Temma\Base\Datasource {
 	}
 
 	/* ********** SPECIAL REQUESTS ********** */
+	/**
+	 * Return the database engine type.
+	 * @return	?string	The type ('mysql', 'pgsql', 'sqlite', ...), as defined in the DSN.
+	 */
+	public function getType() : ?string {
+		return ($this->_type);
+	}
 	/**
 	 * Return the last SQL error.
 	 * @return	string	The last error.
@@ -535,6 +548,14 @@ class Sql extends \Temma\Base\Datasource {
 	public function lastInsertId() : int {
 		if (!$this->_enabled)
 			return (0);
+		// PostgreSQL: PDO::lastInsertId() needs a sequence name, use LASTVAL() instead
+		if ($this->_type == 'pgsql') {
+			try {
+				return ((int)$this->queryOne('SELECT LASTVAL() AS id', 'id'));
+			} catch (\Exception $e) {
+				return (0);
+			}
+		}
 		$this->connect();
 		return ((int)$this->_db->lastInsertId());
 	}
@@ -545,7 +566,11 @@ class Sql extends \Temma\Base\Datasource {
 	 */
 	public function execBufferedRequests() : int {
 		$lineCount = 0;
-		foreach ($this->_bufferedRequests as $request) {
+		// empty the list before executing the requests: if a request fails, it must not
+		// stay in the list and be replayed by every subsequent call
+		$requests = $this->_bufferedRequests;
+		$this->_bufferedRequests = [];
+		foreach ($requests as $request) {
 			$lineCount = $this->_db->exec($request);
 			if ($lineCount === false) {
 				$errStr = 'Database request error: ' . $this->getError();
@@ -553,7 +578,6 @@ class Sql extends \Temma\Base\Datasource {
 				throw new TµDatabaseException($errStr, TµDatabaseException::QUERY);
 			}
 		}
-		$this->_bufferedRequests = [];
 		return ($lineCount);
 	}
 

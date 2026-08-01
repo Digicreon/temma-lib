@@ -70,6 +70,8 @@ class Dao {
 	protected string $_criteriaObject = '\Temma\Dao\Criteria';
 	/** Database connection. */
 	protected \Temma\Datasources\Sql $_db;
+	/** Database engine type ('mysql', 'pgsql' or 'sqlite'; other engines are treated as MySQL). */
+	protected string $_dbType = 'mysql';
 	/** Cache connection. */
 	protected ?\Temma\Base\Datasource $_cache;
 	/** Tell if the cache must be disabled. */
@@ -101,6 +103,8 @@ class Dao {
 	public function __construct(\Temma\Datasources\Sql $db, ?\Temma\Base\Datasource $cache=null, ?string $tableName=null,
 	                            ?string $idField='id', ?string $dbName=null, ?array $fields=null, ?string $criteriaObject=null) {
 		$this->_db = $db;
+		$type = $db->getType();
+		$this->_dbType = ($type == 'sqlite2') ? 'sqlite' : ($type ?: 'mysql');
 		$this->_cache = $cache;
 		if (empty($this->_tableName))
 			$this->_tableName = $tableName;
@@ -142,7 +146,9 @@ class Dao {
 	 * @return	string	The name of the database.
 	 */
 	public function getDatabaseName() : string {
-		$sql = "SELECT DATABASE() AS dbname";
+		if ($this->_dbType == 'sqlite')
+			return ('main');
+		$sql = ($this->_dbType == 'pgsql') ? 'SELECT current_database() AS dbname' : 'SELECT DATABASE() AS dbname';
 		$result = $this->_db->queryOne($sql);
 		return ($result['dbname']);
 	}
@@ -177,19 +183,45 @@ class Dao {
 		return ($this->_fieldAliases[$field] ?? $field);
 	}
 	/**
+	 * Escape and quote an SQL identifier (database, table or field name), with backticks
+	 * (MySQL, SQLite) or double quotes (PostgreSQL).
+	 * This method may also be used by \Temma\Dao\Criteria objects.
+	 * @param	string	$identifier	The identifier to quote.
+	 * @return	string	The quoted identifier.
+	 */
+	public function quoteIdentifier(string $identifier) : string {
+		if ($this->_dbType == 'pgsql')
+			return ('"' . str_replace('"', '""', $identifier) . '"');
+		return ('`' . str_replace('`', '``', $identifier) . '`');
+	}
+	/**
 	 * Tell if the table exists.
 	 * @param	string	$tableName	(optional) Name of the table to check. If empty,
 	 *					check the DAO's table.
 	 * @return	bool	True if the table exists.
 	 */
 	public function tableExists(?string $tableName=null) : bool {
-		$dbName = $this->getDatabaseName();
 		$tableName = $tableName ?: $this->_tableName;
-		$sql = "SELECT COUNT(*) AS cnt
-		        FROM information_schema.TABLES
-		        WHERE TABLE_SCHEMA = " . $this->_db->quote($dbName) . "
-		          AND TABLE_TYPE = 'BASE TABLE'
-		          AND TABLE_NAME = " . $this->_db->quote($tableName);
+		if ($this->_dbType == 'sqlite') {
+			$sql = "SELECT COUNT(*) AS cnt
+			        FROM sqlite_master
+			        WHERE type = 'table'
+			          AND name = " . $this->_db->quote($tableName);
+		} else if ($this->_dbType == 'pgsql') {
+			$sql = "SELECT COUNT(*) AS cnt
+			        FROM information_schema.tables
+			        WHERE table_catalog = current_database()
+			          AND table_schema = current_schema()
+			          AND table_type = 'BASE TABLE'
+			          AND table_name = " . $this->_db->quote($tableName);
+		} else {
+			$dbName = $this->getDatabaseName();
+			$sql = "SELECT COUNT(*) AS cnt
+			        FROM information_schema.TABLES
+			        WHERE TABLE_SCHEMA = " . $this->_db->quote($dbName) . "
+			          AND TABLE_TYPE = 'BASE TABLE'
+			          AND TABLE_NAME = " . $this->_db->quote($tableName);
+		}
 		$count = $this->_db->queryOne($sql, 'cnt');
 		return ((bool)$count);
 	}
@@ -214,7 +246,7 @@ class Dao {
 	public function count(null|array|\Temma\Dao\Criteria $criteria=null) : int {
 		$cacheVarName = '__dao:' . $this->_dbName . ':' . $this->_tableName . ':count';
 		$sql = 'SELECT COUNT(*) AS nb
-			FROM ' . (!$this->_dbName ? '' : ('`' . $this->_dbName . '`.')) . '`' . $this->_tableName . '`';
+			FROM ' . $this->_getTableString();
 		if (isset($criteria)) {
 			if (is_array($criteria)) {
 				$crit = $this->criteria();
@@ -244,7 +276,7 @@ class Dao {
 	 */
 	public function get(int|string|array|\Temma\Dao\Criteria $id) : array {
 		if (is_int($id) || is_string($id)) {
-			$where = '`' . $this->_idField . "` = " . $this->_db->quote($id);
+			$where = $this->quoteIdentifier($this->_idField) . ' = ' . $this->_db->quote($id);
 			$idHash = md5($id);
 		} else {
 			if (is_array($id)) {
@@ -261,8 +293,7 @@ class Dao {
 		if (($data = $this->_getCache($cacheVarName)) !== null)
 			return ($data);
 		// query execution
-		$sql = 'SELECT ' . $this->_getFieldsString() . ' FROM ' .
-			(!$this->_dbName ? '' : ('`' . $this->_dbName . '`.')) . '`' . $this->_tableName . '`' .
+		$sql = 'SELECT ' . $this->_getFieldsString() . ' FROM ' . $this->_getTableString() .
 			' WHERE ' . $where;
 		$data = $this->_db->queryOne($sql);
 		// write result in cache
@@ -288,9 +319,9 @@ class Dao {
 		$this->_flushCache();
 		// boolean used for the safe data (telling if the primary key is in the given data)
 		$idUpdated = false;
-		// create and execute the query
-		$sql = 'INSERT INTO ' . (empty($this->_dbName) ? '' : ($this->_dbName . '.')) . $this->_tableName .
-			' SET ';
+		// generate the lists of column names and quoted values, and the assignment string used by the safe mode
+		$columns = [];
+		$values = [];
 		$set = [];
 		foreach ($data as $key => $value) {
 			// manage the key
@@ -301,29 +332,38 @@ class Dao {
 				$idUpdated = true;
 			// add the data
 			if (is_null($value))
-				$set[] = "`$key` = NULL";
+				$quotedValue = 'NULL';
 			else if (is_string($value) || is_numeric($value) || is_bool($value))
-				$set[] = "`$key` = " . $this->_db->quote($value);
+				$quotedValue = $this->_db->quote($value);
 			else
 				throw new TµDaoException("Bad field value for key '$key'.", TµDaoException::FIELD);
+			$columns[] = $this->quoteIdentifier($key);
+			$values[] = $quotedValue;
+			$set[] = $this->quoteIdentifier($key) . ' = ' . $quotedValue;
 		}
 		$dataSet = implode(', ', $set);
-		$sql .= $dataSet;
+		// create the query
+		$sql = 'INSERT INTO ' . $this->_getTableString() . ' (' . implode(', ', $columns) . ') VALUES (' . implode(', ', $values) . ')';
 		// management of key duplication
 		if (!is_null($safeData)) {
-			$sql .= ' ON DUPLICATE KEY UPDATE ';
-			if (!$idUpdated && $this->_idField) {
-				// this instruction is used to make the subsequent call to LAST_INSERT_ID() returns the rightful value
-				// see: https://stackoverflow.com/questions/778534/mysql-on-duplicate-key-last-insert-id
-				$sql .= '`' . $this->_idField . '` = LAST_INSERT_ID(`' . $this->_idField . '`), ';
+			if ($this->_dbType == 'mysql') {
+				$sql .= ' ON DUPLICATE KEY UPDATE ';
+				if (!$idUpdated && $this->_idField) {
+					// this instruction is used to make the subsequent call to LAST_INSERT_ID() returns the rightful value
+					// see: https://stackoverflow.com/questions/778534/mysql-on-duplicate-key-last-insert-id
+					$sql .= $this->quoteIdentifier($this->_idField) . ' = LAST_INSERT_ID(' . $this->quoteIdentifier($this->_idField) . '), ';
+				}
+			} else {
+				// PostgreSQL and SQLite: the conflict target is the primary key
+				$sql .= ' ON CONFLICT (' . $this->quoteIdentifier($this->_idField) . ') DO UPDATE SET ';
 			}
 			if ($safeData === true)
 				$sql .= $dataSet;
 			else if (is_string($safeData)) {
 				if (isset($data[$safeData]))
-					$sql .= "`$safeData` = " . $this->_db->quote($data[$safeData]);
+					$sql .= $this->quoteIdentifier($safeData) . ' = ' . $this->_db->quote($data[$safeData]);
 				else
-					$sql .= "`$safeData` = '$safeData'";
+					$sql .= $this->quoteIdentifier($safeData) . ' = ' . $this->_getExistingValueString($safeData);
 			} else if (is_array($safeData)) {
 				$set = [];
 				foreach ($safeData as $key) {
@@ -331,11 +371,18 @@ class Dao {
 						continue;
 					$value = $data[$key];
 					$key = (($field = array_search($key, $this->_fields)) === false || is_int($field)) ? $key : $field;
-					$set[] = "`$key` = " . $this->_db->quote($value);
+					$set[] = $this->quoteIdentifier($key) . ' = ' . $this->_db->quote($value);
 				}
 				$sql .= implode(', ', $set);
 			} else
-				$sql .= '`' . $this->_idField . '` = `' . $this->_idField . '`';
+				$sql .= $this->quoteIdentifier($this->_idField) . ' = ' . $this->_getExistingValueString($this->_idField);
+		}
+		// PostgreSQL (always) and SQLite (in safe mode): use a RETURNING clause to get the
+		// primary key of the created record, because lastInsertId() is not usable there
+		if ($this->_idField && ($this->_dbType == 'pgsql' || ($this->_dbType == 'sqlite' && !is_null($safeData)))) {
+			$sql .= ' RETURNING ' . $this->quoteIdentifier($this->_idField);
+			$row = $this->_db->queryOne($sql);
+			return ((int)($row[$this->_idField] ?? 0));
 		}
 		$this->_db->exec($sql);
 		return ($this->_db->lastInsertId());
@@ -351,8 +398,7 @@ class Dao {
 	 */
 	public function search(null|array|\Temma\Dao\Criteria $criteria=null, null|bool|string|array $sort=null, ?int $limitOffset=null, ?int $limit=null) : array {
 		$cacheVarName = '__dao:' . $this->_dbName . ':' . $this->_tableName . ':count';
-		$sql = 'SELECT ' . $this->_getFieldsString() . ' FROM ' .
-			(!$this->_dbName ? '' : ('`' . $this->_dbName . '`.')) . '`' . $this->_tableName . '`';
+		$sql = 'SELECT ' . $this->_getFieldsString() . ' FROM ' . $this->_getTableString();
 		if (isset($criteria)) {
 			if (is_array($criteria)) {
 				$crit = $this->criteria();
@@ -366,11 +412,18 @@ class Dao {
 		}
 		$sql .= $this->_getSortString($sort);
 		if (!is_null($limitOffset) && !is_null($limit))
-			$sql .= " LIMIT $limitOffset, $limit";
+			$sql .= " LIMIT $limit OFFSET $limitOffset";
 		else if (!is_null($limit))
 			$sql .= " LIMIT $limit";
-		else if (!is_null($limitOffset))
-			$sql .= " OFFSET $limitOffset";
+		else if (!is_null($limitOffset)) {
+			// offset without limit: PostgreSQL accepts a bare OFFSET clause, the other engines don't
+			if ($this->_dbType == 'pgsql')
+				$sql .= " OFFSET $limitOffset";
+			else if ($this->_dbType == 'sqlite')
+				$sql .= " LIMIT -1 OFFSET $limitOffset";
+			else
+				$sql .= " LIMIT 18446744073709551615 OFFSET $limitOffset";
+		}
 		// on cherche la donnée en cache
 		$cacheVarName = '__dao:' . $this->_dbName . ':' . $this->_tableName . ':search:' . hash('md5', $sql);
 		if (($data = $this->_getCache($cacheVarName)) !== null)
@@ -399,8 +452,7 @@ class Dao {
 			return (0);
 		$this->_flushCache();
 		// creation of the request
-		$sql = 'UPDATE ' . (!$this->_dbName ? '' : ('`' . $this->_dbName . '`.')) . '`' . $this->_tableName . '`' .
-			' SET ';
+		$sql = 'UPDATE ' . $this->_getTableString() . ' SET ';
 		$set = [];
 		foreach ($fields as $field => $value) {
 			// get the field if it is aliased
@@ -408,11 +460,11 @@ class Dao {
 				$field = $field2;
 			// request generation
 			if (is_string($value) || is_int($value) || is_float($value))
-				$set[] = "`$field` = " . $this->_db->quote($value);
+				$set[] = $this->quoteIdentifier($field) . ' = ' . $this->_db->quote($value);
 			else if (is_bool($value))
-				$set[] = "`$field` = " . ($value ? 'TRUE' : 'FALSE');
+				$set[] = $this->quoteIdentifier($field) . ' = ' . ($value ? 'TRUE' : 'FALSE');
 			else if (is_null($value))
-				$set[] = "`$field` = NULL";
+				$set[] = $this->quoteIdentifier($field) . ' = NULL';
 			else
 				throw new TµDaoException("Bad field '$field' value.", TµDaoException::VALUE);
 		}
@@ -420,7 +472,7 @@ class Dao {
 		if (!is_null($criteria)) {
 			$sql .= ' WHERE ';
 			if (is_int($criteria) || is_string($criteria))
-				$sql .= '`' . $this->_idField . "` = " . $this->_db->quote($criteria);
+				$sql .= $this->quoteIdentifier($this->_idField) . ' = ' . $this->_db->quote($criteria);
 			else {
 				if (is_array($criteria)) {
 					$crit = $this->criteria();
@@ -431,9 +483,11 @@ class Dao {
 				$sql .= $criteria->generate();
 			}
 		}
-		// sort management
-		$sql .= $this->_getSortString($sort);
-		// limit management
+		// sort and limit management (only supported by MySQL in UPDATE queries)
+		$sortString = $this->_getSortString($sort);
+		if (($sortString || !is_null($limit)) && $this->_dbType != 'mysql')
+			throw new TµDaoException("Sort and limit parameters are not supported by this database engine in update queries.", TµDaoException::CRITERIA);
+		$sql .= $sortString;
 		if (!is_null($limit))
 			$sql .= " LIMIT $limit";
 		$modified = $this->_db->exec($sql);
@@ -449,11 +503,11 @@ class Dao {
 		// effacement du cache pour cette DAO
 		$this->_flushCache();
 		// constitution et exécution de la requête
-		$sql = 'DELETE FROM ' . (!$this->_dbName ? '' : ('`' . $this->_dbName . '`.')) . '`' . $this->_tableName . '`';
+		$sql = 'DELETE FROM ' . $this->_getTableString();
 		if (!is_null($criteria)) {
 			$sql .= ' WHERE ';
 			if (is_int($criteria) || is_string($criteria))
-				$sql .= '`' . $this->_idField . "` = " . $this->_db->quote($criteria);
+				$sql .= $this->quoteIdentifier($this->_idField) . ' = ' . $this->_db->quote($criteria);
 			else {
 				if (is_array($criteria)) {
 					$crit = $this->criteria();
@@ -490,6 +544,26 @@ class Dao {
 
 	/* ****** PRIVATE METHODS ****** */
 	/**
+	 * Generate the quoted table name, prefixed with the quoted database name if defined.
+	 * @return	string	The generated string.
+	 */
+	protected function _getTableString() : string {
+		return ((!$this->_dbName ? '' : ($this->quoteIdentifier($this->_dbName) . '.')) . $this->quoteIdentifier($this->_tableName));
+	}
+	/**
+	 * Generate the SQL reference to the value already stored in the table for the given field,
+	 * as used in the update clause of an upsert query ("keep the former value").
+	 * @param	string	$field	The field name.
+	 * @return	string	The generated string.
+	 */
+	protected function _getExistingValueString(string $field) : string {
+		// MySQL (ON DUPLICATE KEY UPDATE): the bare field name refers to the stored value;
+		// PostgreSQL and SQLite (ON CONFLICT DO UPDATE): it must be prefixed with the table name
+		if ($this->_dbType == 'mysql')
+			return ($this->quoteIdentifier($field));
+		return ($this->quoteIdentifier($this->_tableName) . '.' . $this->quoteIdentifier($field));
+	}
+	/**
 	 * Generates the sort string.
 	 * @param	null|bool|string|array		$sort		(optional) Sort data:
 	 *								- null: natural sort.
@@ -504,14 +578,14 @@ class Dao {
 			return ('');
 		$sortList = [];
 		if ($sort === false)
-			$sortList[] = 'RAND()';
+			$sortList[] = ($this->_dbType == 'mysql') ? 'RAND()' : 'RANDOM()';
 		else if ($sort === true)
-			$sortList[] = '`' . $this->_idField . '` DESC';
+			$sortList[] = $this->quoteIdentifier($this->_idField) . ' DESC';
 		else if (is_string($sort)) {
 			if (str_starts_with($sort, '-'))
-				$sortList[] = mb_substr($sort, 1) . ' DESC';
+				$sortList[] = $this->quoteIdentifier(mb_substr($sort, 1)) . ' DESC';
 			else
-				$sortList[] = $sort;
+				$sortList[] = $this->quoteIdentifier($sort);
 		} else if (is_array($sort)) {
 			foreach ($sort as $key => $value) {
 				$field = is_int($key) ? $value : $key;
@@ -522,7 +596,7 @@ class Dao {
 					$sortType = (!is_int($key) && !strcasecmp($value, 'desc')) ? 'DESC' : 'ASC';
 				if (($field2 = array_search($field, $this->_fields)) !== false && !is_int($field2))
 					$field = $field2;
-				$sortList[] = "$field $sortType";
+				$sortList[] = $this->quoteIdentifier($field) . " $sortType";
 			}
 		}
 		if (!$sortList)
@@ -542,9 +616,9 @@ class Dao {
 			$list = [];
 			foreach ($this->_fields as $fieldName => $aliasName) {
 				if (is_int($fieldName))
-					$list[] = '`' . $aliasName . '`';
+					$list[] = $this->quoteIdentifier($aliasName);
 				else
-					$list[] = "`$fieldName` AS `$aliasName`";
+					$list[] = $this->quoteIdentifier($fieldName) . ' AS ' . $this->quoteIdentifier($aliasName);
 			}
 			$this->_fieldsString = implode(', ', $list);
 		}
